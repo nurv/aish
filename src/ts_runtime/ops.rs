@@ -87,6 +87,12 @@ pub fn op_log(#[string] message: String) {
     println!("[TS] {}", message);
 }
 
+/// Console.log implementation
+#[op2(fast)]
+pub fn op_console_log(#[string] message: String) {
+    println!("{}", message);
+}
+
 /// Execute shell command from TypeScript
 #[op2(async)]
 #[string]

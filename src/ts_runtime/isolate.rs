@@ -22,19 +22,76 @@ impl TypeScriptIsolate {
                 ops::op_get_env,
                 ops::op_set_env,
                 ops::op_log,
+                ops::op_console_log,
                 ops::op_execute_command,
                 ops::op_register_agent_tool,
                 ops::op_get_agent_tools,
                 ops::op_call_agent_tool,
-            ]
+            ],
         );
         
         // Create JsRuntime with module loader for TypeScript support
-        let runtime = JsRuntime::new(RuntimeOptions {
+        let mut runtime = JsRuntime::new(RuntimeOptions {
             module_loader: Some(Rc::new(TsModuleLoader)),
             extensions: vec![aish_ops::init()],
             ..Default::default()
         });
+        
+        // Initialize console object
+        let console_init = r#"
+            globalThis.console = {
+                log: (...args) => {
+                    const message = args.map(arg => {
+                        if (typeof arg === 'string') {
+                            return arg;
+                        } else if (typeof arg === 'object' && arg !== null) {
+                            try {
+                                return JSON.stringify(arg, null, 2);
+                            } catch {
+                                return '[object]';
+                            }
+                        } else {
+                            return String(arg);
+                        }
+                    }).join(' ');
+                    Deno.core.ops.op_console_log(message);
+                },
+                error: (...args) => {
+                    const message = "ERROR: " + args.map(arg => {
+                        if (typeof arg === 'string') {
+                            return arg;
+                        } else if (typeof arg === 'object' && arg !== null) {
+                            try {
+                                return JSON.stringify(arg, null, 2);
+                            } catch {
+                                return '[object]';
+                            }
+                        } else {
+                            return String(arg);
+                        }
+                    }).join(' ');
+                    Deno.core.ops.op_console_log(message);
+                },
+                warn: (...args) => {
+                    const message = "WARN: " + args.map(arg => {
+                        if (typeof arg === 'string') {
+                            return arg;
+                        } else if (typeof arg === 'object' && arg !== null) {
+                            try {
+                                return JSON.stringify(arg, null, 2);
+                            } catch {
+                                return '[object]';
+                            }
+                        } else {
+                            return String(arg);
+                        }
+                    }).join(' ');
+                    Deno.core.ops.op_console_log(message);
+                }
+            };
+        "#;
+        
+        runtime.execute_script("console_init", FastString::from(console_init.to_string()))?;
         
         Ok(Self { runtime })
     }
@@ -80,6 +137,7 @@ impl TypeScriptIsolate {
         let local_result = deno_core::v8::Local::new(scope, result);
         let result_string = serde_v8::from_v8::<String>(scope, local_result)?;
         let json_value: Value = serde_json::from_str(&result_string)?;
+        print!("{}", json_value);
         Ok(json_value)
     }
 
