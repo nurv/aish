@@ -1,4 +1,5 @@
 pub mod isolate;
+pub mod module_loader;
 pub mod ops;
 
 pub use isolate::TypeScriptIsolate;
@@ -100,36 +101,12 @@ impl TypeScriptConfigLoader {
     }
 
     fn create_default_config(path: &Path) -> Result<()> {
-        let default_config = r#"// aish TypeScript Configuration
+        let default_config = r#"// aish JavaScript Configuration
 // This file is executed by aish to load configuration and custom functions
-// Full TypeScript support with type checking and intellisense
-
-// TypeScript interface definitions for type safety
-interface AishConfig {
-  ai: {
-    model: string;
-    temperature: number;
-    max_tokens: number;
-    api_key?: string;
-  };
-  shell: {
-    prompt: string;
-    history_size: number;
-    multiline_continuation: string;
-  };
-}
-
-interface ToolParams {
-  [key: string]: any;
-}
-
-interface ToolResult {
-  success: boolean;
-  [key: string]: any;
-}
+// Simple JavaScript for compatibility with the basic runtime
 
 // Default configuration - export this as the main config
-const config: AishConfig = {
+const config = {
   ai: {
     model: "gpt-4",
     temperature: 0.7,
@@ -145,14 +122,17 @@ const config: AishConfig = {
 
 // Example custom prompt function
 function customPrompt() {
-  const shellInfo = Deno.core.ops.op_get_shell_info();
-  const time = new Date().toLocaleTimeString();
-  return `[${time}] ${shellInfo.user}@${shellInfo.hostname}:${shellInfo.current_dir} [${shellInfo.mode}]$ `;
+  try {
+    const shellInfo = Deno.core.ops.op_get_shell_info();
+    const time = new Date().toLocaleTimeString();
+    return `[${time}] ${shellInfo.user}@${shellInfo.hostname}:${shellInfo.current_dir} [${shellInfo.mode}]$ `;
+  } catch (error) {
+    return "aish> ";
+  }
 }
 
 // Example utility function for future AI agent integration
 function getProjectInfo() {
-  // This could be expanded to provide project-specific context to AI agents
   return {
     type: "rust",
     name: "aish",
@@ -160,8 +140,8 @@ function getProjectInfo() {
   };
 }
 
-// Define agent tool functions with TypeScript types
-function listFiles(params: { path?: string; pattern?: string }): ToolResult {
+// Define agent tool functions
+function listFiles(params) {
   const targetPath = params.path || Deno.core.ops.op_get_shell_info().current_dir;
   const pattern = params.pattern || "*";
   
@@ -183,7 +163,7 @@ function listFiles(params: { path?: string; pattern?: string }): ToolResult {
   }
 }
 
-function readFile(params: { path: string; lines?: number }): ToolResult {
+function readFile(params) {
   try {
     const command = params.lines 
       ? `head -n ${params.lines} "${params.path}"`
@@ -204,7 +184,7 @@ function readFile(params: { path: string; lines?: number }): ToolResult {
   }
 }
 
-function gitStatus(params: {}): ToolResult {
+function gitStatus(params) {
   try {
     const status = Deno.core.ops.op_execute_command("git status --porcelain");
     const branch = Deno.core.ops.op_execute_command("git branch --show-current").trim();
@@ -222,7 +202,7 @@ function gitStatus(params: {}): ToolResult {
   }
 }
 
-// Generate JSON Schema from TypeScript function signatures
+// Agent tools schema
 const agentTools = {
   tools: {
     "list_files": {

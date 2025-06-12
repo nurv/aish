@@ -1,7 +1,13 @@
 use deno_core::op2;
+use deno_error::{JsErrorClass, AdditionalProperties};
 use std::env;
+use std::borrow::Cow;
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use serde_json::Value;
 
-// Create a custom error type that implements JsErrorClass
+// Custom error type for operations
 #[derive(Debug, thiserror::Error)]
 pub enum AishError {
     #[error("Command execution failed: {0}")]
@@ -10,27 +16,26 @@ pub enum AishError {
     ToolNotFound(String),
 }
 
-impl deno_error::JsErrorClass for AishError {
-    fn get_class(&self) -> std::borrow::Cow<'static, str> {
+impl JsErrorClass for AishError {
+    fn get_class(&self) -> Cow<'static, str> {
         match self {
-            AishError::CommandFailed(_) => "CommandExecutionError".into(),
-            AishError::ToolNotFound(_) => "ToolNotFoundError".into(),
+            AishError::CommandFailed(_) => Cow::Borrowed("Error"),
+            AishError::ToolNotFound(_) => Cow::Borrowed("Error"),
         }
     }
 
-    fn get_message(&self) -> std::borrow::Cow<'static, str> {
-        self.to_string().into()
+    fn get_message(&self) -> Cow<'static, str> {
+        Cow::Owned(self.to_string())
     }
 
-    fn get_additional_properties(&self) -> Vec<(std::borrow::Cow<'static, str>, std::borrow::Cow<'static, str>)> {
-        vec![]
+    fn get_additional_properties(&self) -> AdditionalProperties {
+        Box::new(std::iter::empty())
     }
 
-    fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
-use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct ShellInfo {
@@ -39,11 +44,6 @@ pub struct ShellInfo {
     pub user: String,
     pub hostname: String,
     pub home_dir: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct PromptResult {
-    pub prompt: String,
 }
 
 /// Get current shell information
@@ -78,9 +78,7 @@ pub fn op_get_env(#[string] key: String) -> Option<String> {
 /// Set environment variable (for configuration)
 #[op2(fast)]
 pub fn op_set_env(#[string] key: String, #[string] value: String) {
-    unsafe {
-        env::set_var(key, value);
-    }
+    env::set_var(key, value);
 }
 
 /// Log message from TypeScript
@@ -108,19 +106,13 @@ pub async fn op_execute_command(#[string] command: String) -> Result<String, Ais
         Ok(stdout.to_string())
     } else {
         Err(AishError::CommandFailed(format!("Command failed: {}\nSTDOUT: {}\nSTDERR: {}", 
-                   command, stdout, stderr)))
+               command, stdout, stderr)))
     }
 }
-
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use serde_json::Value;
 
 // Global tool registry for storing registered tools
 lazy_static::lazy_static! {
     static ref TOOL_REGISTRY: Arc<Mutex<HashMap<String, (String, Value)>>> = 
-        Arc::new(Mutex::new(HashMap::new()));
-    static ref TOOL_FUNCTIONS: Arc<Mutex<HashMap<String, Box<dyn Fn(Value) -> Result<Value, AishError> + Send + Sync>>>> = 
         Arc::new(Mutex::new(HashMap::new()));
 }
 
@@ -183,4 +175,3 @@ pub async fn op_call_agent_tool(#[string] tool_name: String, #[string] parameter
         "note": "Tool call would be dispatched to TypeScript runtime"
     })).unwrap_or_else(|_| "{}".to_string()))
 }
-

@@ -1,114 +1,84 @@
 use anyhow::Result;
-use deno_core::ModuleSpecifier;
-use deno_runtime::worker::{MainWorker, WorkerOptions};
-use deno_runtime::permissions::{Permissions, PermissionsContainer};
-use deno_runtime::BootstrapOptions;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use deno_core::{
+    JsRuntime, RuntimeOptions, FastString, ModuleSpecifier,
+};
+use std::path::Path;
+use std::rc::Rc;
 use serde_json::Value;
-use url::Url;
+use super::module_loader::TsModuleLoader;
+use super::ops;
 
 pub struct TypeScriptIsolate {
-    worker: MainWorker,
+    runtime: JsRuntime,
 }
 
 impl TypeScriptIsolate {
-    pub async fn new(script_path: &Path) -> Result<Self> {
-        // Create extension with our ops
+    pub async fn new(_script_path: &Path) -> Result<Self> {
+        // Define the extension declaratively
         deno_core::extension!(
-            aish_extension,
+            aish_ops,
             ops = [
-                super::ops::op_get_shell_info,
-                super::ops::op_get_env,
-                super::ops::op_set_env,
-                super::ops::op_log,
-                super::ops::op_execute_command,
+                ops::op_get_shell_info,
+                ops::op_get_env,
+                ops::op_set_env,
+                ops::op_log,
+                ops::op_execute_command,
+                ops::op_register_agent_tool,
+                ops::op_get_agent_tools,
+                ops::op_call_agent_tool,
             ]
         );
-
-        // Convert path to module specifier
-        let main_module = Url::from_file_path(script_path)
-            .map_err(|_| anyhow::anyhow!("Failed to create module specifier from path: {:?}", script_path))?;
-
-        // Create temporary directories for Deno runtime
-        let temp_dir = tempfile::tempdir()?;
-        let cache_dir = temp_dir.path().join("cache");
-        let origin_dir = temp_dir.path().join("origin");
-        std::fs::create_dir_all(&cache_dir)?;
-        std::fs::create_dir_all(&origin_dir)?;
-
-        // Create permissions
-        let permissions = PermissionsContainer::new(Permissions::allow_all());
-
-        // Create bootstrap options
-        let bootstrap_options = BootstrapOptions {
-            location: Some(main_module.clone()),
-            argv0: Some("aish".to_string()),
-            ..BootstrapOptions::default()
-        };
-
-        // Create worker options with our extensions
-        let worker_options = WorkerOptions {
-            bootstrap: bootstrap_options.clone(),
-            extensions: vec![aish_extension::init_ops_and_esm()],
-            cache_storage_dir: Some(cache_dir),
-            origin_storage_dir: Some(origin_dir),
-            ..Default::default()
-        };
-
-        // Create MainWorker with TypeScript support
-        let mut worker = MainWorker::from_options(
-            ModuleSpecifier::from(main_module.clone()),
-            permissions,
-            worker_options,
-        );
         
-        // Bootstrap the worker
-        worker.bootstrap(bootstrap_options);
-
-        Ok(Self { worker })
+        // Create JsRuntime with module loader for TypeScript support
+        let runtime = JsRuntime::new(RuntimeOptions {
+            module_loader: Some(Rc::new(TsModuleLoader)),
+            extensions: vec![aish_ops::init()],
+            ..Default::default()
+        });
+        
+        Ok(Self { runtime })
     }
 
     pub async fn execute(&mut self, script_path: &Path) -> Result<()> {
         // Convert path to module specifier
-        let main_module = ModuleSpecifier::from_file_path(script_path)
-            .map_err(|_| anyhow::anyhow!("Failed to create module specifier from path: {:?}", script_path))?;
+        let module_specifier = ModuleSpecifier::from_file_path(script_path)
+            .map_err(|_| anyhow::anyhow!("Failed to convert path to module specifier"))?;
         
-        // Execute the main module (MainWorker handles TypeScript transpilation automatically)
-        self.worker.execute_main_module(&main_module).await?;
+        // Load and execute the module (TypeScript will be transpiled automatically)
+        let module_id = self.runtime.load_main_es_module(&module_specifier).await?;
         
-        // Run event loop to completion
-        self.worker.run_event_loop(false).await?;
+        // Evaluate the module
+        let result = self.runtime.mod_evaluate(module_id);
+        self.runtime.run_event_loop(Default::default()).await?;
+        result.await?;
         
         Ok(())
     }
 
-
     pub async fn call_function(&mut self, function_name: &str, args: &[Value]) -> Result<Value> {
+        let args_str = args.iter()
+            .map(|arg| arg.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+            
         let script = format!(
             r#"
-            if (typeof {} === 'function') {{
-                const result = {}({});
-                JSON.stringify(result);
-            }} else {{
-                throw new Error('Function {} not found or not a function');
-            }}
+            (function() {{
+                if (typeof globalThis.{} === 'function') {{
+                    const result = globalThis.{}({});
+                    return JSON.stringify(result);
+                }} else {{
+                    throw new Error('Function {} not found or not a function');
+                }}
+            }})()
             "#,
-            function_name,
-            function_name,
-            args.iter()
-                .map(|arg| arg.to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-            function_name
+            function_name, function_name, args_str, function_name
         );
 
-        let result = self.worker.js_runtime.execute_script("<anon>", script)?;
-        let result_string = {
-            let scope = &mut self.worker.js_runtime.handle_scope();
-            let local_result = deno_core::v8::Local::new(scope, result);
-            serde_v8::from_v8::<String>(scope, local_result)?
-        };
+        let result = self.runtime.execute_script("call_function", FastString::from(script))?;
+        let scope = &mut self.runtime.handle_scope();
+        let local_result = deno_core::v8::Local::new(scope, result);
+        let result_string = serde_v8::from_v8::<String>(scope, local_result)?;
         let json_value: Value = serde_json::from_str(&result_string)?;
         Ok(json_value)
     }
@@ -116,21 +86,21 @@ impl TypeScriptIsolate {
     pub async fn get_export(&mut self, export_name: &str) -> Result<Value> {
         let script = format!(
             r#"
-            if (typeof {} !== 'undefined') {{
-                JSON.stringify({});
-            }} else {{
-                throw new Error('Export {} not found');
-            }}
+            (function() {{
+                if (typeof globalThis.{} !== 'undefined') {{
+                    return JSON.stringify(globalThis.{});
+                }} else {{
+                    throw new Error('Export {} not found');
+                }}
+            }})()
             "#,
             export_name, export_name, export_name
         );
 
-        let result = self.worker.js_runtime.execute_script("<anon>", script)?;
-        let result_string = {
-            let scope = &mut self.worker.js_runtime.handle_scope();
-            let local_result = deno_core::v8::Local::new(scope, result);
-            serde_v8::from_v8::<String>(scope, local_result)?
-        };
+        let result = self.runtime.execute_script("get_export", FastString::from(script))?;
+        let scope = &mut self.runtime.handle_scope();
+        let local_result = deno_core::v8::Local::new(scope, result);
+        let result_string = serde_v8::from_v8::<String>(scope, local_result)?;
         let json_value: Value = serde_json::from_str(&result_string)?;
         Ok(json_value)
     }
